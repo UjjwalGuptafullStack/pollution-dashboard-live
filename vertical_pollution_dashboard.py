@@ -187,7 +187,7 @@ def create_parameter_info_display():
     
     with col1:
         st.markdown("##### 🔵 Node-1 (35m) - Full Environmental Suite")
-        node1_params = get_available_parameters('Node-1 (35m)')
+        node1_params = list(NODES_CONFIG[1]['field_mapping'].values())
         for param in node1_params:
             if 'PM' in param:
                 st.markdown(f"• 💨 **{param}** - Particulate Matter")
@@ -204,7 +204,7 @@ def create_parameter_info_display():
     
     with col2:
         st.markdown("##### 🔴 Node-2 (25m) - Gas Monitoring Focus")
-        node2_params = get_available_parameters('Node-2 (25m)')
+        node2_params = list(NODES_CONFIG[2]['field_mapping'].values())
         for param in node2_params:
             if 'Temperature' in param and '_2' in param:
                 st.markdown(f"• 🌡️ **{param}** - Secondary Temperature")
@@ -905,12 +905,18 @@ def main():
         
         # Parameter selection with availability info
         if analysis_mode == "Single Node":
-            available_params = get_available_parameters(selected_node) if 'selected_node' in locals() else list(FIELD_MAPPING.values())
+            if 'selected_node' in locals():
+                node_config = NODES_CONFIG[selected_node]
+                available_params = list(node_config['field_mapping'].values())
+            else:
+                available_params = list(FIELD_MAPPING.values())
         else:
-            # Dual node mode - show parameter availability
-            common_params = get_common_parameters()
-            node1_only = [p for p in get_available_parameters(1) if p not in common_params]
-            node2_only = [p for p in get_available_parameters(2) if p not in common_params]
+            # Dual node mode - show parameter availability based on config
+            node1_params = set(NODES_CONFIG[1]['field_mapping'].values())
+            node2_params = set(NODES_CONFIG[2]['field_mapping'].values())
+            common_params = list(node1_params & node2_params)
+            node1_only = list(node1_params - node2_params)
+            node2_only = list(node2_params - node1_params)
             
             # Show parameter availability info in expander
             with st.expander("📊 Parameter Availability Info", expanded=False):
@@ -1670,7 +1676,10 @@ def main():
             
             if not filtered_df1.empty and not filtered_df2.empty:
                 # Parameter selector for gradient analysis - only common parameters
-                common_params = get_common_parameters()
+                node1_params = set(NODES_CONFIG[1]['field_mapping'].values())
+                node2_params = set(NODES_CONFIG[2]['field_mapping'].values())
+                common_params = list(node1_params & node2_params)
+                
                 if common_params:
                     gradient_params = st.multiselect(
                         "Select parameters for gradient analysis:",
