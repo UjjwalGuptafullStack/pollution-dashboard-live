@@ -159,26 +159,6 @@ def fetch_both_nodes_data(results=2000):
     
     return node1_data, node2_data
 
-def get_available_parameters(node_name):
-    """Get available parameters for a specific node"""
-    if node_name in NODES_CONFIG:
-        return list(NODES_CONFIG[node_name]['field_mapping'].values())
-    return list(FIELD_MAPPING.values())
-
-def get_common_parameters(df1, df2):
-    """Get parameters that are common between both nodes"""
-    if df1 is None or df2 is None:
-        return []
-    
-    params1 = set(df1.columns)
-    params2 = set(df2.columns)
-    
-    # Common parameters (excluding metadata columns)
-    exclude_cols = {'created_at', 'created_at_local', 'node_name', 'height_m', 'entry_id'}
-    common = (params1 & params2) - exclude_cols
-    
-    return list(common)
-
 def create_parameter_info_display():
     """Create an informative display about parameter availability"""
     st.subheader("📊 Node Parameter Configuration")
