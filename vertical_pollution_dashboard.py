@@ -58,9 +58,21 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Constants
-THINGSPEAK_CHANNEL_ID = "3111437"
-THINGSPEAK_API_URL = f"https://api.thingspeak.com/channels/{THINGSPEAK_CHANNEL_ID}/feeds.json"
+# Constants for both nodes
+NODES_CONFIG = {
+    'Node-1 (35m)': {
+        'channel_id': '3111437',
+        'api_key': 'YPFZP7D18YEMQXWG',
+        'height': 35,
+        'url': 'https://api.thingspeak.com/channels/3111437/feeds.json'
+    },
+    'Node-2 (25m)': {
+        'channel_id': '2839248',
+        'api_key': 'OWWYZK5OXTZBC65U',
+        'height': 25,
+        'url': 'https://api.thingspeak.com/channels/2839248/feeds.json'
+    }
+}
 
 # Field mapping for ThingSpeak
 FIELD_MAPPING = {
@@ -75,16 +87,17 @@ FIELD_MAPPING = {
 
 # Cache data for 5 minutes
 @st.cache_data(ttl=300)
-def fetch_thingspeak_data(results=2000):
-    """Fetch data from ThingSpeak API"""
+def fetch_thingspeak_data(node_name, results=2000):
+    """Fetch data from ThingSpeak API for specified node"""
     try:
+        node_config = NODES_CONFIG[node_name]
         params = {'results': results}
-        response = requests.get(THINGSPEAK_API_URL, params=params, timeout=10)
+        response = requests.get(node_config['url'], params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         
         if 'feeds' not in data or not data['feeds']:
-            st.error("No data found in ThingSpeak channel")
+            st.error(f"No data found in {node_name} ThingSpeak channel")
             return None
             
         # Convert to DataFrame
@@ -95,6 +108,10 @@ def fetch_thingspeak_data(results=2000):
         df['created_at_local'] = df['created_at'] + pd.Timedelta(hours=5, minutes=30)  # Convert to IST
         # Remove timezone info to avoid comparison issues
         df['created_at_local'] = df['created_at_local'].dt.tz_localize(None)
+        
+        # Add node information
+        df['node_name'] = node_name
+        df['height_m'] = node_config['height']
         
         # Rename fields and convert to numeric
         for field, name in FIELD_MAPPING.items():
@@ -108,40 +125,178 @@ def fetch_thingspeak_data(results=2000):
         return df.sort_values('created_at')
         
     except Exception as e:
-        st.error(f"Error fetching data: {str(e)}")
+        st.error(f"Error fetching data from {node_name}: {str(e)}")
         return None
 
-def get_data_status(df):
+@st.cache_data(ttl=300)
+def fetch_both_nodes_data(results=2000):
+    """Fetch data from both nodes and combine for comparison"""
+    node1_data = fetch_thingspeak_data('Node-1 (35m)', results)
+    node2_data = fetch_thingspeak_data('Node-2 (25m)', results)
+    
+    return node1_data, node2_data
+
+def calculate_vertical_gradient(df1, df2, parameter, time_window_minutes=30):
+    """Calculate vertical gradient between two nodes"""
+    if df1 is None or df2 is None or df1.empty or df2.empty:
+        return None
+    
+    # Synchronize timestamps (within time window)
+    gradients = []
+    
+    for idx, row1 in df1.iterrows():
+        # Find closest measurement from node 2
+        time_diff = abs(df2['created_at_local'] - row1['created_at_local'])
+        closest_idx = time_diff.idxmin()
+        
+        if time_diff[closest_idx].total_seconds() <= time_window_minutes * 60:
+            row2 = df2.loc[closest_idx]
+            
+            # Calculate gradient (concentration difference / height difference)
+            height_diff = row1['height_m'] - row2['height_m']  # 35m - 25m = 10m
+            conc_diff = row1[parameter] - row2[parameter]
+            
+            if height_diff != 0:
+                gradient = conc_diff / height_diff  # units per meter
+                gradients.append({
+                    'timestamp': row1['created_at_local'],
+                    'gradient': gradient,
+                    'node1_value': row1[parameter],
+                    'node2_value': row2[parameter],
+                    'height_diff': height_diff
+                })
+    
+    return pd.DataFrame(gradients)
+
+def create_dual_node_comparison(df1, df2, parameter):
+    """Create comparison visualization between two nodes"""
+    if df1 is None or df2 is None or df1.empty or df2.empty:
+        return None
+    
+    fig = go.Figure()
+    
+    # Node 1 (35m)
+    fig.add_trace(go.Scatter(
+        x=df1['created_at_local'],
+        y=df1[parameter],
+        mode='lines',
+        name='Node-1 (35m)',
+        line=dict(color='blue', width=2),
+        opacity=0.8
+    ))
+    
+    # Node 2 (25m)
+    fig.add_trace(go.Scatter(
+        x=df2['created_at_local'],
+        y=df2[parameter],
+        mode='lines',
+        name='Node-2 (25m)',
+        line=dict(color='red', width=2),
+        opacity=0.8
+    ))
+    
+    fig.update_layout(
+        title=f"Dual Node Comparison - {parameter}",
+        xaxis_title="Time (IST)",
+        yaxis_title=f"{parameter}",
+        height=400,
+        hovermode='x unified',
+        legend=dict(x=0, y=1)
+    )
+    
+    return fig
+
+def create_vertical_gradient_plot(gradient_df, parameter):
+    """Create vertical gradient visualization"""
+    if gradient_df is None or gradient_df.empty:
+        return None
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=gradient_df['timestamp'],
+        y=gradient_df['gradient'],
+        mode='lines+markers',
+        name=f'Vertical Gradient',
+        line=dict(color='green', width=2),
+        marker=dict(size=4)
+    ))
+    
+    # Add zero line
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+    
+    fig.update_layout(
+        title=f"Vertical Gradient - {parameter} (35m - 25m)",
+        xaxis_title="Time (IST)",
+        yaxis_title=f"Gradient ({parameter}/m)",
+        height=400,
+        hovermode='x'
+    )
+    
+    return fig
+
+def create_height_profile_plot(df1, df2, parameter, time_point=None):
+    """Create vertical profile at specific time or latest values"""
+    if df1 is None or df2 is None or df1.empty or df2.empty:
+        return None
+    
+    # Use latest values if no specific time given
+    if time_point is None:
+        val_35m = df1[parameter].iloc[-1]
+        val_25m = df2[parameter].iloc[-1]
+        time_str = df1['created_at_local'].iloc[-1].strftime('%Y-%m-%d %H:%M:%S')
+    else:
+        # Find closest values to specified time
+        idx1 = (abs(df1['created_at_local'] - time_point)).idxmin()
+        idx2 = (abs(df2['created_at_local'] - time_point)).idxmin()
+        val_35m = df1.loc[idx1, parameter]
+        val_25m = df2.loc[idx2, parameter]
+        time_str = time_point.strftime('%Y-%m-%d %H:%M:%S')
+    
+    heights = [25, 35]
+    values = [val_25m, val_35m]
+    
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=values,
+        y=heights,
+        mode='markers+lines',
+        name=f'{parameter} Profile',
+        marker=dict(size=12, color=['red', 'blue']),
+        line=dict(width=3, color='purple')
+    ))
+    
+    # Add labels
+    fig.add_annotation(x=val_25m, y=25, text="Node-2 (25m)", 
+                      showarrow=True, arrowhead=2, arrowsize=1, arrowcolor="red")
+    fig.add_annotation(x=val_35m, y=35, text="Node-1 (35m)", 
+                      showarrow=True, arrowhead=2, arrowsize=1, arrowcolor="blue")
+    
+    fig.update_layout(
+        title=f"Vertical Profile - {parameter}<br><sub>{time_str} IST</sub>",
+        xaxis_title=f"{parameter}",
+        yaxis_title="Height (meters)",
+        height=500,
+        showlegend=False
+    )
+    
+    return fig
+
+def get_data_status(df, node_name="Node"):
     """Get current data collection status"""
     if df is None or df.empty:
-        return "❌ No Data", "No data available", "danger"
+        return f"❌ No Data ({node_name})", "No data available", "danger"
     
     last_update = df['created_at_local'].iloc[-1]
+    time_diff = datetime.now() - last_update.replace(tzinfo=None)
     
-    # Handle timezone-aware comparison
-    if hasattr(last_update, 'tz') and last_update.tz is not None:
-        # If data has timezone info, use it
-        current_time = pd.Timestamp.now(tz=last_update.tz)
-        time_diff = current_time - last_update
+    if time_diff < timedelta(minutes=5):
+        return f"🟢 Live ({node_name})", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "success"
+    elif time_diff < timedelta(hours=1):
+        return f"🟡 Recent ({node_name})", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "warning"
     else:
-        # If no timezone info, treat as naive datetime
-        current_time = pd.Timestamp.now().tz_localize(None)
-        if hasattr(last_update, 'tz_localize'):
-            last_update = last_update.tz_localize(None)
-        time_diff = current_time - last_update
-    
-    # Convert to timedelta if it's not already
-    if hasattr(time_diff, 'total_seconds'):
-        time_diff_seconds = time_diff.total_seconds()
-    else:
-        time_diff_seconds = time_diff.total_seconds()
-    
-    if time_diff_seconds < 300:  # 5 minutes
-        return "🟢 Live", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "success"
-    elif time_diff_seconds < 3600:  # 1 hour
-        return "🟡 Recent", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "warning"
-    else:
-        return "🔴 Offline", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "danger"
+        return f"🔴 Offline ({node_name})", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "danger"
 
 def filter_data_by_timerange(df, timerange):
     """Filter dataframe by selected time range"""
@@ -355,6 +510,19 @@ def main():
     with st.sidebar:
         st.header("⚙️ Controls")
         
+        # Node selection
+        analysis_mode = st.radio(
+            "🏗️ Analysis Mode",
+            ["Single Node", "Dual Node Comparison"],
+            index=1  # Default to dual node comparison
+        )
+        
+        if analysis_mode == "Single Node":
+            selected_node = st.selectbox(
+                "📡 Select Node",
+                list(NODES_CONFIG.keys())
+            )
+        
         # Auto-refresh toggle
         auto_refresh = st.checkbox("Auto-refresh (10 min)", value=True)
         if auto_refresh:
@@ -394,133 +562,364 @@ def main():
         st.markdown("📊 [Diwali Analysis](https://ujjwalguptafullstack-esw-dashboard-ycciky.streamlit.app/)")
         st.markdown("🌐 [GCD Dashboard](https://gcd-dashboard.netlify.app/)")
     
-    # Fetch data
+    # Fetch data based on analysis mode
     with st.spinner("Fetching live data from ThingSpeak..."):
-        df = fetch_thingspeak_data(2000)
+        if analysis_mode == "Single Node":
+            df = fetch_thingspeak_data(selected_node, 2000)
+            df1, df2 = df, None
+        else:
+            df1, df2 = fetch_both_nodes_data(2000)
     
-    if df is None:
-        st.error("Unable to fetch data. Please check your connection.")
-        return
-    
-    # Data status
-    status, status_text, status_type = get_data_status(df)
-    
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        st.markdown(f"**Status:** {status} {status_text}")
-    with col2:
-        st.markdown(f"**Total Records:** {len(df):,}")
-    with col3:
-        if not df.empty:
-            duration = df['created_at_local'].iloc[-1] - df['created_at_local'].iloc[0]
-            st.markdown(f"**Duration:** {duration.days} days")
-    
-    st.markdown("""
-    <div class="info-box">
-        <strong>📍 Node Information:</strong> Live data from Node-1 (~12 m height) | Running continuously since mid-Nov 2025
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Filter data by time range
-    filtered_df = filter_data_by_timerange(df, timerange)
-    
-    if filtered_df.empty:
-        st.warning(f"No data available for {timerange}")
-        return
+    if analysis_mode == "Single Node":
+        if df is None:
+            st.error("Unable to fetch data. Please check your connection.")
+            return
+        
+        # Single node analysis (existing logic)
+        status, status_text, status_type = get_data_status(df, selected_node)
+        
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            st.markdown(f"**Status:** {status} {status_text}")
+        with col2:
+            st.markdown(f"**Total Records:** {len(df):,}")
+        with col3:
+            if not df.empty:
+                duration = df['created_at_local'].iloc[-1] - df['created_at_local'].iloc[0]
+                st.markdown(f"**Duration:** {duration.days} days")
+        
+        node_height = NODES_CONFIG[selected_node]['height']
+        st.markdown(f"""
+        <div class="info-box">
+            <strong>📍 Node Information:</strong> Live data from {selected_node} ({node_height}m height) | Running continuously since mid-Nov 2025
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Filter data by time range
+        filtered_df = filter_data_by_timerange(df, timerange)
+        
+    else:
+        # Dual node comparison analysis
+        if df1 is None and df2 is None:
+            st.error("Unable to fetch data from both nodes. Please check your connections.")
+            return
+        elif df1 is None:
+            st.error("Unable to fetch data from Node-1 (35m). Showing Node-2 only.")
+            df, filtered_df = df2, filter_data_by_timerange(df2, timerange)
+        elif df2 is None:
+            st.error("Unable to fetch data from Node-2 (25m). Showing Node-1 only.")
+            df, filtered_df = df1, filter_data_by_timerange(df1, timerange)
+        else:
+            # Both nodes available - show dual status
+            status1, status_text1, _ = get_data_status(df1, "Node-1 (35m)")
+            status2, status_text2, _ = get_data_status(df2, "Node-2 (25m)")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown(f"**Node-1 Status:** {status1}")
+                st.caption(status_text1)
+                if not df1.empty:
+                    st.markdown(f"**Records:** {len(df1):,}")
+            
+            with col2:
+                st.markdown(f"**Node-2 Status:** {status2}")
+                st.caption(status_text2)
+                if not df2.empty:
+                    st.markdown(f"**Records:** {len(df2):,}")
+            
+            st.markdown("""
+            <div class="info-box">
+                <strong>📍 Dual Node Setup:</strong> Node-1 at 35m height | Node-2 at 25m height | 10m vertical separation for gradient analysis
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Filter data by time range for both nodes
+            filtered_df1 = filter_data_by_timerange(df1, timerange)
+            filtered_df2 = filter_data_by_timerange(df2, timerange)
+            
+            if filtered_df1.empty and filtered_df2.empty:
+                st.warning(f"No data available for {timerange} from either node")
+                return
     
     # Current readings (live metrics)
-    st.header("📊 Current Readings")
+    if analysis_mode == "Single Node":
+        if filtered_df.empty:
+            st.warning(f"No data available for {timerange}")
+            return
+            
+        st.header("📊 Current Readings")
+        
+        if not filtered_df.empty:
+            latest_data = filtered_df.iloc[-1]
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                if 'Temperature_C' in latest_data:
+                    st.metric(
+                        "🌡️ Temperature",
+                        f"{latest_data['Temperature_C']:.1f}°C",
+                        delta=f"{latest_data['Temperature_C'] - filtered_df['Temperature_C'].mean():.1f}°C"
+                    )
+                if 'PM2_5_ugm3' in latest_data:
+                    st.metric(
+                        "💨 PM2.5",
+                        f"{latest_data['PM2_5_ugm3']:.1f} µg/m³",
+                        delta=f"{latest_data['PM2_5_ugm3'] - filtered_df['PM2_5_ugm3'].mean():.1f}"
+                    )
+            
+            with col2:
+                if 'Humidity_%' in latest_data:
+                    st.metric(
+                        "💧 Humidity",
+                        f"{latest_data['Humidity_%']:.1f}%",
+                        delta=f"{latest_data['Humidity_%'] - filtered_df['Humidity_%'].mean():.1f}%"
+                    )
+                if 'PM10_ugm3' in latest_data:
+                    st.metric(
+                        "🌫️ PM10",
+                        f"{latest_data['PM10_ugm3']:.1f} µg/m³",
+                        delta=f"{latest_data['PM10_ugm3'] - filtered_df['PM10_ugm3'].mean():.1f}"
+                    )
+            
+            with col3:
+                if 'CO2_ppm' in latest_data:
+                    st.metric(
+                        "🏭 CO₂",
+                        f"{latest_data['CO2_ppm']:.0f} ppm",
+                        delta=f"{latest_data['CO2_ppm'] - filtered_df['CO2_ppm'].mean():.0f}"
+                    )
+                if 'CO_ppm' in latest_data:
+                    st.metric(
+                        "☁️ CO",
+                        f"{latest_data['CO_ppm']:.1f} ppm",
+                        delta=f"{latest_data['CO_ppm'] - filtered_df['CO_ppm'].mean():.1f}"
+                    )
+            
+            with col4:
+                if 'NO2_ppb' in latest_data:
+                    st.metric(
+                        "🚗 NO₂",
+                        f"{latest_data['NO2_ppb']:.1f} ppb",
+                        delta=f"{latest_data['NO2_ppb'] - filtered_df['NO2_ppb'].mean():.1f}"
+                    )
     
-    if not filtered_df.empty:
-        latest_data = filtered_df.iloc[-1]
+    else:  # Dual node comparison mode
+        st.header("📊 Dual Node Current Readings")
         
-        col1, col2, col3, col4 = st.columns(4)
+        col_node1, col_node2 = st.columns(2)
         
-        with col1:
-            if 'Temperature_C' in latest_data:
-                st.metric(
-                    "🌡️ Temperature",
-                    f"{latest_data['Temperature_C']:.1f}°C",
-                    delta=f"{latest_data['Temperature_C'] - filtered_df['Temperature_C'].mean():.1f}°C"
-                )
-            if 'PM2_5_ugm3' in latest_data:
-                st.metric(
-                    "💨 PM2.5",
-                    f"{latest_data['PM2_5_ugm3']:.1f} µg/m³",
-                    delta=f"{latest_data['PM2_5_ugm3'] - filtered_df['PM2_5_ugm3'].mean():.1f}"
-                )
+        # Node 1 readings
+        with col_node1:
+            st.subheader("🔵 Node-1 (35m)")
+            if not filtered_df1.empty:
+                latest_data1 = filtered_df1.iloc[-1]
+                
+                sub_col1, sub_col2 = st.columns(2)
+                with sub_col1:
+                    if 'Temperature_C' in latest_data1:
+                        st.metric("🌡️ Temperature", f"{latest_data1['Temperature_C']:.1f}°C")
+                    if 'PM2_5_ugm3' in latest_data1:
+                        st.metric("💨 PM2.5", f"{latest_data1['PM2_5_ugm3']:.1f} µg/m³")
+                    if 'CO2_ppm' in latest_data1:
+                        st.metric("🏭 CO₂", f"{latest_data1['CO2_ppm']:.0f} ppm")
+                
+                with sub_col2:
+                    if 'Humidity_%' in latest_data1:
+                        st.metric("💧 Humidity", f"{latest_data1['Humidity_%']:.1f}%")
+                    if 'PM10_ugm3' in latest_data1:
+                        st.metric("🌫️ PM10", f"{latest_data1['PM10_ugm3']:.1f} µg/m³")
+                    if 'NO2_ppb' in latest_data1:
+                        st.metric("🚗 NO₂", f"{latest_data1['NO2_ppb']:.1f} ppb")
+            else:
+                st.warning("No recent data from Node-1")
         
-        with col2:
-            if 'Humidity_%' in latest_data:
-                st.metric(
-                    "💧 Humidity",
-                    f"{latest_data['Humidity_%']:.1f}%",
-                    delta=f"{latest_data['Humidity_%'] - filtered_df['Humidity_%'].mean():.1f}%"
-                )
-            if 'PM10_ugm3' in latest_data:
-                st.metric(
-                    "🌫️ PM10",
-                    f"{latest_data['PM10_ugm3']:.1f} µg/m³",
-                    delta=f"{latest_data['PM10_ugm3'] - filtered_df['PM10_ugm3'].mean():.1f}"
-                )
+        # Node 2 readings
+        with col_node2:
+            st.subheader("🔴 Node-2 (25m)")
+            if not filtered_df2.empty:
+                latest_data2 = filtered_df2.iloc[-1]
+                
+                sub_col1, sub_col2 = st.columns(2)
+                with sub_col1:
+                    if 'Temperature_C' in latest_data2:
+                        st.metric("🌡️ Temperature", f"{latest_data2['Temperature_C']:.1f}°C")
+                    if 'PM2_5_ugm3' in latest_data2:
+                        st.metric("💨 PM2.5", f"{latest_data2['PM2_5_ugm3']:.1f} µg/m³")
+                    if 'CO2_ppm' in latest_data2:
+                        st.metric("🏭 CO₂", f"{latest_data2['CO2_ppm']:.0f} ppm")
+                
+                with sub_col2:
+                    if 'Humidity_%' in latest_data2:
+                        st.metric("💧 Humidity", f"{latest_data2['Humidity_%']:.1f}%")
+                    if 'PM10_ugm3' in latest_data2:
+                        st.metric("🌫️ PM10", f"{latest_data2['PM10_ugm3']:.1f} µg/m³")
+                    if 'NO2_ppb' in latest_data2:
+                        st.metric("🚗 NO₂", f"{latest_data2['NO2_ppb']:.1f} ppb")
+            else:
+                st.warning("No recent data from Node-2")
         
-        with col3:
-            if 'CO2_ppm' in latest_data:
-                st.metric(
-                    "🏭 CO₂",
-                    f"{latest_data['CO2_ppm']:.0f} ppm",
-                    delta=f"{latest_data['CO2_ppm'] - filtered_df['CO2_ppm'].mean():.0f}"
-                )
-            if 'CO_ppm' in latest_data:
-                st.metric(
-                    "☁️ CO",
-                    f"{latest_data['CO_ppm']:.1f} ppm",
-                    delta=f"{latest_data['CO_ppm'] - filtered_df['CO_ppm'].mean():.1f}"
-                )
-        
-        with col4:
-            if 'NO2_ppb' in latest_data:
-                st.metric(
-                    "🚗 NO₂",
-                    f"{latest_data['NO2_ppb']:.1f} ppb",
-                    delta=f"{latest_data['NO2_ppb'] - filtered_df['NO2_ppb'].mean():.1f}"
-                )
+        # Calculate and display current gradient
+        if not filtered_df1.empty and not filtered_df2.empty:
+            st.header("⚡ Current Vertical Gradient")
+            latest1 = filtered_df1.iloc[-1]
+            latest2 = filtered_df2.iloc[-1]
+            
+            gradient_cols = st.columns(len(FIELD_MAPPING))
+            for i, (field, param) in enumerate(FIELD_MAPPING.items()):
+                with gradient_cols[i]:
+                    if param in latest1 and param in latest2:
+                        val1, val2 = latest1[param], latest2[param]
+                        gradient = (val1 - val2) / 10  # 35m - 25m = 10m difference
+                        st.metric(
+                            param.replace('_', ' ').replace('ugm3', 'µg/m³').replace('ppm', ' ppm').replace('ppb', ' ppb'),
+                            f"{gradient:+.3f}/m",
+                            delta=f"35m: {val1:.1f} | 25m: {val2:.1f}"
+                        )
     
     # Time series visualization
     st.header("📈 Time Series Analysis")
     
-    fig_ts = create_time_series_plot(filtered_df, parameter, smoothing_window)
-    if fig_ts:
-        st.plotly_chart(fig_ts, use_container_width=True)
-    
-    # Analysis tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🕒 Diurnal Analysis",
-        "🌅 Day vs Night",
-        "📅 Weekly Trends",
-        "🔗 Correlations",
-        "📏 Vertical Profile"
-    ])
+    if analysis_mode == "Single Node":
+        fig_ts = create_time_series_plot(filtered_df, parameter, smoothing_window)
+        if fig_ts:
+            st.plotly_chart(fig_ts, use_container_width=True)
+    else:
+        # Dual node comparison charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📊 Dual Node Comparison")
+            fig_dual = create_dual_node_comparison(filtered_df1, filtered_df2, parameter)
+            if fig_dual:
+                st.plotly_chart(fig_dual, use_container_width=True)
+        
+        with col2:
+            st.subheader("📏 Current Vertical Profile")
+            fig_profile = create_height_profile_plot(filtered_df1, filtered_df2, parameter)
+            if fig_profile:
+                st.plotly_chart(fig_profile, use_container_width=True)
+        
+        # Vertical gradient analysis
+        st.subheader("⚡ Vertical Gradient Analysis")
+        gradient_df = calculate_vertical_gradient(filtered_df1, filtered_df2, parameter, 30)
+        
+        if gradient_df is not None and not gradient_df.empty:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig_gradient = create_vertical_gradient_plot(gradient_df, parameter)
+                if fig_gradient:
+                    st.plotly_chart(fig_gradient, use_container_width=True)
+            
+            with col2:
+                st.subheader("📊 Gradient Statistics")
+                mean_gradient = gradient_df['gradient'].mean()
+                std_gradient = gradient_df['gradient'].std()
+                max_gradient = gradient_df['gradient'].max()
+                min_gradient = gradient_df['gradient'].min()
+                
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.metric("Mean Gradient", f"{mean_gradient:+.4f}/m")
+                    st.metric("Max Gradient", f"{max_gradient:+.4f}/m")
+                with col_b:
+                    st.metric("Std Deviation", f"{std_gradient:.4f}/m")
+                    st.metric("Min Gradient", f"{min_gradient:+.4f}/m")
+                
+                # Interpretation
+                if abs(mean_gradient) < 0.001:
+                    st.info("🟢 **Well-mixed conditions** - Minimal vertical stratification")
+                elif mean_gradient > 0:
+                    st.warning("🟡 **Surface accumulation** - Higher concentrations at 35m")
+                else:
+                    st.error("🔴 **Ground-level buildup** - Higher concentrations at 25m")
+        else:
+            st.warning("Insufficient synchronized data for gradient calculation")
+
+    # Analysis tabs - adapt based on mode
+    if analysis_mode == "Single Node":
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "🕒 Diurnal Analysis",
+            "🌅 Day vs Night", 
+            "📅 Weekly Trends",
+            "🔗 Correlations",
+            "📏 Vertical Profile"
+        ])
+    else:
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "🕒 Diurnal Comparison",
+            "🌅 Day vs Night",
+            "📅 Weekly Trends", 
+            "🔗 Correlations",
+            "📏 Height Profiles",
+            "⚡ Gradient Analysis"
+        ])
     
     with tab1:
-        st.subheader(f"Diurnal Variation - {parameter}")
-        diurnal_data = calculate_diurnal_variation(filtered_df, parameter)
-        
-        if not diurnal_data.empty:
-            fig = px.bar(
-                diurnal_data,
-                x='hour',
-                y='mean',
-                error_y='std',
-                title=f"Hourly Average {parameter}",
-                labels={'hour': 'Hour of Day', 'mean': f'Average {parameter}'}
-            )
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
+        if analysis_mode == "Single Node":
+            st.subheader(f"Diurnal Variation - {parameter}")
+            diurnal_data = calculate_diurnal_variation(filtered_df, parameter)
             
-            # Data table
-            with st.expander("📊 View Hourly Statistics"):
-                st.dataframe(diurnal_data, use_container_width=True)
+            if not diurnal_data.empty:
+                fig = px.bar(
+                    diurnal_data,
+                    x='hour',
+                    y='mean',
+                    error_y='std',
+                    title=f"Hourly Average {parameter}",
+                    labels={'hour': 'Hour of Day', 'mean': f'Average {parameter}'}
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Data table
+                with st.expander("📊 View Hourly Statistics"):
+                    st.dataframe(diurnal_data, use_container_width=True)
+        else:
+            st.subheader(f"Diurnal Comparison - {parameter}")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("##### 🔵 Node-1 (35m)")
+                if not filtered_df1.empty:
+                    diurnal_data1 = calculate_diurnal_variation(filtered_df1, parameter)
+                    if not diurnal_data1.empty:
+                        fig1 = px.bar(
+                            diurnal_data1,
+                            x='hour',
+                            y='mean',
+                            error_y='std',
+                            title=f"Node-1: Hourly Average {parameter}",
+                            labels={'hour': 'Hour of Day', 'mean': f'Average {parameter}'},
+                            color_discrete_sequence=['blue']
+                        )
+                        fig1.update_layout(height=400)
+                        st.plotly_chart(fig1, use_container_width=True)
+                        
+                        with st.expander("📊 Node-1 Hourly Stats"):
+                            st.dataframe(diurnal_data1, use_container_width=True)
+            
+            with col2:
+                st.markdown("##### 🔴 Node-2 (25m)")
+                if not filtered_df2.empty:
+                    diurnal_data2 = calculate_diurnal_variation(filtered_df2, parameter)
+                    if not diurnal_data2.empty:
+                        fig2 = px.bar(
+                            diurnal_data2,
+                            x='hour',
+                            y='mean',
+                            error_y='std',
+                            title=f"Node-2: Hourly Average {parameter}",
+                            labels={'hour': 'Hour of Day', 'mean': f'Average {parameter}'},
+                            color_discrete_sequence=['red']
+                        )
+                        fig2.update_layout(height=400)
+                        st.plotly_chart(fig2, use_container_width=True)
+                        
+                        with st.expander("📊 Node-2 Hourly Stats"):
+                            st.dataframe(diurnal_data2, use_container_width=True)
     
     with tab2:
         st.subheader(f"Day vs Night Comparison - {parameter}")
