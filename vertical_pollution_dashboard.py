@@ -64,17 +64,35 @@ NODES_CONFIG = {
         'channel_id': '3111437',
         'api_key': 'YPFZP7D18YEMQXWG',
         'height': 35,
-        'url': 'https://api.thingspeak.com/channels/3111437/feeds.json'
+        'url': 'https://api.thingspeak.com/channels/3111437/feeds.json',
+        'field_mapping': {
+            'field1': 'Temperature_C',
+            'field2': 'Humidity_%',
+            'field3': 'PM2_5_ugm3',
+            'field4': 'PM10_ugm3',
+            'field5': 'CO2_ppm',
+            'field6': 'CO_ppm',
+            'field7': 'NO2_ppb'
+        }
     },
     'Node-2 (25m)': {
         'channel_id': '2839248',
         'api_key': 'OWWYZK5OXTZBC65U',
         'height': 25,
-        'url': 'https://api.thingspeak.com/channels/2839248/feeds.json'
+        'url': 'https://api.thingspeak.com/channels/2839248/feeds.json',
+        'field_mapping': {
+            'field1': 'Temperature_C',
+            'field2': 'Humidity_%',
+            'field3': 'CO2_ppm',
+            'field4': 'CO_ppm',
+            'field5': 'Temperature_C_2',  # Secondary temperature sensor
+            'field6': 'Humidity_%_2',    # Secondary humidity sensor
+            'field7': 'NO2_ppb'
+        }
     }
 }
 
-# Field mapping for ThingSpeak
+# Combined field mapping for display purposes (Node-1 fields as reference)
 FIELD_MAPPING = {
     'field1': 'Temperature_C',
     'field2': 'Humidity_%',
@@ -113,14 +131,19 @@ def fetch_thingspeak_data(node_name, results=2000):
         df['node_name'] = node_name
         df['height_m'] = node_config['height']
         
-        # Rename fields and convert to numeric
-        for field, name in FIELD_MAPPING.items():
+        # Rename fields and convert to numeric using node-specific mapping
+        node_field_mapping = node_config['field_mapping']
+        for field, name in node_field_mapping.items():
             if field in df.columns:
                 df[name] = pd.to_numeric(df[field], errors='coerce')
         
         # Drop original field columns and NaN rows
         df = df.drop(columns=[f'field{i}' for i in range(1, 9) if f'field{i}' in df.columns])
-        df = df.dropna(subset=list(FIELD_MAPPING.values()))
+        
+        # Only drop NaN rows for fields that actually exist in this node
+        available_fields = [name for name in node_field_mapping.values() if name in df.columns]
+        if available_fields:
+            df = df.dropna(subset=available_fields)
         
         return df.sort_values('created_at')
         
@@ -136,21 +159,99 @@ def fetch_both_nodes_data(results=2000):
     
     return node1_data, node2_data
 
+def get_available_parameters(node_name):
+    """Get available parameters for a specific node"""
+    if node_name in NODES_CONFIG:
+        return list(NODES_CONFIG[node_name]['field_mapping'].values())
+    return list(FIELD_MAPPING.values())
+
+def get_common_parameters(df1, df2):
+    """Get parameters that are common between both nodes"""
+    if df1 is None or df2 is None:
+        return []
+    
+    params1 = set(df1.columns)
+    params2 = set(df2.columns)
+    
+    # Common parameters (excluding metadata columns)
+    exclude_cols = {'created_at', 'created_at_local', 'node_name', 'height_m', 'entry_id'}
+    common = (params1 & params2) - exclude_cols
+    
+    return list(common)
+
+def create_parameter_info_display():
+    """Create an informative display about parameter availability"""
+    st.subheader("📊 Node Parameter Configuration")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("##### 🔵 Node-1 (35m) - Full Environmental Suite")
+        node1_params = get_available_parameters('Node-1 (35m)')
+        for param in node1_params:
+            if 'PM' in param:
+                st.markdown(f"• 💨 **{param}** - Particulate Matter")
+            elif 'Temperature' in param:
+                st.markdown(f"• 🌡️ **{param}** - Temperature")
+            elif 'Humidity' in param:
+                st.markdown(f"• 💧 **{param}** - Humidity")
+            elif 'CO2' in param:
+                st.markdown(f"• 🏭 **{param}** - Carbon Dioxide")
+            elif 'CO_ppm' in param:
+                st.markdown(f"• ☁️ **{param}** - Carbon Monoxide")
+            elif 'NO2' in param:
+                st.markdown(f"• 🚗 **{param}** - Nitrogen Dioxide")
+    
+    with col2:
+        st.markdown("##### 🔴 Node-2 (25m) - Gas Monitoring Focus")
+        node2_params = get_available_parameters('Node-2 (25m)')
+        for param in node2_params:
+            if 'Temperature' in param and '_2' in param:
+                st.markdown(f"• 🌡️ **{param}** - Secondary Temperature")
+            elif 'Temperature' in param:
+                st.markdown(f"• 🌡️ **{param}** - Primary Temperature")
+            elif 'Humidity' in param and '_2' in param:
+                st.markdown(f"• 💧 **{param}** - Secondary Humidity")
+            elif 'Humidity' in param:
+                st.markdown(f"• 💧 **{param}** - Primary Humidity")
+            elif 'CO2' in param:
+                st.markdown(f"• 🏭 **{param}** - Carbon Dioxide")
+            elif 'CO_ppm' in param:
+                st.markdown(f"• ☁️ **{param}** - Carbon Monoxide")
+            elif 'NO2' in param:
+                st.markdown(f"• 🚗 **{param}** - Nitrogen Dioxide")
+    
+    # Common parameters info
+    st.info("📊 **Common Parameters for Comparison**: Temperature, Humidity, CO₂, CO, NO₂")
+    st.warning("⚠️ **Note**: PM2.5 and PM10 are only available on Node-1 (35m). Vertical gradient analysis will focus on common parameters.")
+
 def calculate_vertical_gradient(df1, df2, parameter, time_window_minutes=30):
     """Calculate vertical gradient between two nodes"""
     if df1 is None or df2 is None or df1.empty or df2.empty:
+        return None
+    
+    # Check if parameter exists in both dataframes
+    if parameter not in df1.columns or parameter not in df2.columns:
         return None
     
     # Synchronize timestamps (within time window)
     gradients = []
     
     for idx, row1 in df1.iterrows():
+        # Skip if parameter value is missing
+        if pd.isna(row1[parameter]):
+            continue
+            
         # Find closest measurement from node 2
         time_diff = abs(df2['created_at_local'] - row1['created_at_local'])
         closest_idx = time_diff.idxmin()
         
         if time_diff[closest_idx].total_seconds() <= time_window_minutes * 60:
             row2 = df2.loc[closest_idx]
+            
+            # Skip if parameter value is missing
+            if pd.isna(row2[parameter]):
+                continue
             
             # Calculate gradient (concentration difference / height difference)
             height_diff = row1['height_m'] - row2['height_m']  # 35m - 25m = 10m
@@ -173,30 +274,46 @@ def create_dual_node_comparison(df1, df2, parameter):
     if df1 is None or df2 is None or df1.empty or df2.empty:
         return None
     
+    # Check if parameter exists in both dataframes
+    param_in_df1 = parameter in df1.columns
+    param_in_df2 = parameter in df2.columns
+    
+    if not param_in_df1 and not param_in_df2:
+        return None
+    
     fig = go.Figure()
     
     # Node 1 (35m)
-    fig.add_trace(go.Scatter(
-        x=df1['created_at_local'],
-        y=df1[parameter],
-        mode='lines',
-        name='Node-1 (35m)',
-        line=dict(color='blue', width=2),
-        opacity=0.8
-    ))
+    if param_in_df1:
+        fig.add_trace(go.Scatter(
+            x=df1['created_at_local'],
+            y=df1[parameter],
+            mode='lines',
+            name='Node-1 (35m)',
+            line=dict(color='blue', width=2),
+            opacity=0.8
+        ))
     
     # Node 2 (25m)
-    fig.add_trace(go.Scatter(
-        x=df2['created_at_local'],
-        y=df2[parameter],
-        mode='lines',
-        name='Node-2 (25m)',
-        line=dict(color='red', width=2),
-        opacity=0.8
-    ))
+    if param_in_df2:
+        fig.add_trace(go.Scatter(
+            x=df2['created_at_local'],
+            y=df2[parameter],
+            mode='lines',
+            name='Node-2 (25m)',
+            line=dict(color='red', width=2),
+            opacity=0.8
+        ))
+    
+    # Add annotation if parameter is missing from one node
+    title_suffix = ""
+    if not param_in_df1:
+        title_suffix = " (Node-2 only - not available on Node-1)"
+    elif not param_in_df2:
+        title_suffix = " (Node-1 only - not available on Node-2)"
     
     fig.update_layout(
-        title=f"Dual Node Comparison - {parameter}",
+        title=f"Dual Node Comparison - {parameter}{title_suffix}",
         xaxis_title="Time (IST)",
         yaxis_title=f"{parameter}",
         height=400,
@@ -526,13 +643,23 @@ def create_comprehensive_multi_parameter_plot(df1, df2, timerange="All Time"):
     node2_color = '#d62728'  # Red
     
     # Row 1: Temperature and Humidity
-    if df1 is not None and not df1.empty:
+    if df1 is not None and not df1.empty and 'Temperature_C' in df1.columns:
         fig.add_trace(
             go.Scatter(x=df1['created_at_local'], y=df1['Temperature_C'], 
                       name='Node-1 (35m)', line=dict(color=node1_color, width=2),
                       showlegend=True),
             row=1, col=1
         )
+    
+    if df2 is not None and not df2.empty and 'Temperature_C' in df2.columns:
+        fig.add_trace(
+            go.Scatter(x=df2['created_at_local'], y=df2['Temperature_C'], 
+                      name='Node-2 (25m)', line=dict(color=node2_color, width=2),
+                      showlegend=True),
+            row=1, col=1
+        )
+        
+    if df1 is not None and not df1.empty and 'Humidity_%' in df1.columns:
         fig.add_trace(
             go.Scatter(x=df1['created_at_local'], y=df1['Humidity_%'], 
                       name='Node-1 (35m)', line=dict(color=node1_color, width=2),
@@ -540,13 +667,7 @@ def create_comprehensive_multi_parameter_plot(df1, df2, timerange="All Time"):
             row=1, col=2
         )
     
-    if df2 is not None and not df2.empty:
-        fig.add_trace(
-            go.Scatter(x=df2['created_at_local'], y=df2['Temperature_C'], 
-                      name='Node-2 (25m)', line=dict(color=node2_color, width=2),
-                      showlegend=True),
-            row=1, col=1
-        )
+    if df2 is not None and not df2.empty and 'Humidity_%' in df2.columns:
         fig.add_trace(
             go.Scatter(x=df2['created_at_local'], y=df2['Humidity_%'], 
                       name='Node-2 (25m)', line=dict(color=node2_color, width=2),
@@ -555,54 +676,58 @@ def create_comprehensive_multi_parameter_plot(df1, df2, timerange="All Time"):
         )
     
     # Row 2: PM2.5 & PM10, CO₂
+    # PM data - only available on Node-1
     if df1 is not None and not df1.empty:
-        fig.add_trace(
-            go.Scatter(x=df1['created_at_local'], y=df1['PM2_5_ugm3'], 
-                      name='PM2.5-35m', line=dict(color=node1_color, dash='solid'),
-                      showlegend=False),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df1['created_at_local'], y=df1['PM10_ugm3'], 
-                      name='PM10-35m', line=dict(color=node1_color, dash='dash'),
-                      showlegend=False),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df1['created_at_local'], y=df1['CO2_ppm'], 
-                      name='CO₂-35m', line=dict(color=node1_color, width=2),
-                      showlegend=False),
-            row=2, col=2
-        )
+        if 'PM2_5_ugm3' in df1.columns:
+            fig.add_trace(
+                go.Scatter(x=df1['created_at_local'], y=df1['PM2_5_ugm3'], 
+                          name='PM2.5-35m', line=dict(color=node1_color, dash='solid'),
+                          showlegend=False),
+                row=2, col=1
+            )
+        if 'PM10_ugm3' in df1.columns:
+            fig.add_trace(
+                go.Scatter(x=df1['created_at_local'], y=df1['PM10_ugm3'], 
+                          name='PM10-35m', line=dict(color=node1_color, dash='dash'),
+                          showlegend=False),
+                row=2, col=1
+            )
+        if 'CO2_ppm' in df1.columns:
+            fig.add_trace(
+                go.Scatter(x=df1['created_at_local'], y=df1['CO2_ppm'], 
+                          name='CO₂-35m', line=dict(color=node1_color, width=2),
+                          showlegend=False),
+                row=2, col=2
+            )
     
     if df2 is not None and not df2.empty:
-        fig.add_trace(
-            go.Scatter(x=df2['created_at_local'], y=df2['PM2_5_ugm3'], 
-                      name='PM2.5-25m', line=dict(color=node2_color, dash='solid'),
-                      showlegend=False),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df2['created_at_local'], y=df2['PM10_ugm3'], 
-                      name='PM10-25m', line=dict(color=node2_color, dash='dash'),
-                      showlegend=False),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df2['created_at_local'], y=df2['CO2_ppm'], 
-                      name='CO₂-25m', line=dict(color=node2_color, width=2),
-                      showlegend=False),
-            row=2, col=2
-        )
+        # Note: PM sensors not available on Node-2
+        if 'CO2_ppm' in df2.columns:
+            fig.add_trace(
+                go.Scatter(x=df2['created_at_local'], y=df2['CO2_ppm'], 
+                          name='CO₂-25m', line=dict(color=node2_color, width=2),
+                          showlegend=False),
+                row=2, col=2
+            )
     
     # Row 3: CO, NO₂
-    if df1 is not None and not df1.empty:
+    if df1 is not None and not df1.empty and 'CO_ppm' in df1.columns:
         fig.add_trace(
             go.Scatter(x=df1['created_at_local'], y=df1['CO_ppm'], 
                       name='CO-35m', line=dict(color=node1_color, width=2),
                       showlegend=False),
             row=3, col=1
         )
+    
+    if df2 is not None and not df2.empty and 'CO_ppm' in df2.columns:
+        fig.add_trace(
+            go.Scatter(x=df2['created_at_local'], y=df2['CO_ppm'], 
+                      name='CO-25m', line=dict(color=node2_color, width=2),
+                      showlegend=False),
+            row=3, col=1
+        )
+        
+    if df1 is not None and not df1.empty and 'NO2_ppb' in df1.columns:
         fig.add_trace(
             go.Scatter(x=df1['created_at_local'], y=df1['NO2_ppb'], 
                       name='NO₂-35m', line=dict(color=node1_color, width=2),
@@ -610,13 +735,7 @@ def create_comprehensive_multi_parameter_plot(df1, df2, timerange="All Time"):
             row=3, col=2
         )
     
-    if df2 is not None and not df2.empty:
-        fig.add_trace(
-            go.Scatter(x=df2['created_at_local'], y=df2['CO_ppm'], 
-                      name='CO-25m', line=dict(color=node2_color, width=2),
-                      showlegend=False),
-            row=3, col=1
-        )
+    if df2 is not None and not df2.empty and 'NO2_ppb' in df2.columns:
         fig.add_trace(
             go.Scatter(x=df2['created_at_local'], y=df2['NO2_ppb'], 
                       name='NO₂-25m', line=dict(color=node2_color, width=2),
@@ -626,37 +745,56 @@ def create_comprehensive_multi_parameter_plot(df1, df2, timerange="All Time"):
     
     # Row 4: Vertical Gradients and Data Availability
     if df1 is not None and df2 is not None and not df1.empty and not df2.empty:
-        # Calculate gradients for PM2.5 as example
+        # Calculate gradients for common parameters only
         gradient_data = []
+        
         for idx, row1 in df1.iterrows():
             time_diff = abs(df2['created_at_local'] - row1['created_at_local'])
+            if len(time_diff) == 0:
+                continue
+                
             closest_idx = time_diff.idxmin()
             
             if time_diff[closest_idx].total_seconds() <= 30 * 60:  # 30 minutes window
                 row2 = df2.loc[closest_idx]
-                pm25_gradient = (row1['PM2_5_ugm3'] - row2['PM2_5_ugm3']) / 10  # 35m - 25m = 10m
-                temp_gradient = (row1['Temperature_C'] - row2['Temperature_C']) / 10
                 
-                gradient_data.append({
-                    'time': row1['created_at_local'],
-                    'pm25_grad': pm25_gradient,
-                    'temp_grad': temp_gradient
-                })
+                # Calculate gradients for common parameters only
+                gradient_entry = {'time': row1['created_at_local']}
+                
+                if 'Temperature_C' in df1.columns and 'Temperature_C' in df2.columns:
+                    temp_gradient = (row1['Temperature_C'] - row2['Temperature_C']) / 10
+                    gradient_entry['temp_grad'] = temp_gradient
+                
+                if 'CO2_ppm' in df1.columns and 'CO2_ppm' in df2.columns:
+                    co2_gradient = (row1['CO2_ppm'] - row2['CO2_ppm']) / 10
+                    gradient_entry['co2_grad'] = co2_gradient
+                
+                if 'CO_ppm' in df1.columns and 'CO_ppm' in df2.columns:
+                    co_gradient = (row1['CO_ppm'] - row2['CO_ppm']) / 10
+                    gradient_entry['co_grad'] = co_gradient
+                    
+                gradient_data.append(gradient_entry)
         
         if gradient_data:
             grad_df = pd.DataFrame(gradient_data)
-            fig.add_trace(
-                go.Scatter(x=grad_df['time'], y=grad_df['pm25_grad'], 
-                          name='PM2.5 Gradient', line=dict(color='green', width=2),
-                          showlegend=False),
-                row=4, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=grad_df['time'], y=grad_df['temp_grad'], 
-                          name='Temp Gradient', line=dict(color='orange', width=2),
-                          showlegend=False),
-                row=4, col=1
-            )
+            
+            # Add temperature gradient if available
+            if 'temp_grad' in grad_df.columns:
+                fig.add_trace(
+                    go.Scatter(x=grad_df['time'], y=grad_df['temp_grad'], 
+                              name='Temp Gradient', line=dict(color='orange', width=2),
+                              showlegend=False),
+                    row=4, col=1
+                )
+            
+            # Add CO2 gradient if available
+            if 'co2_grad' in grad_df.columns:
+                fig.add_trace(
+                    go.Scatter(x=grad_df['time'], y=grad_df['co2_grad'], 
+                              name='CO₂ Gradient', line=dict(color='green', width=2),
+                              showlegend=False),
+                    row=4, col=1
+                )
             
             # Add zero line for gradients
             fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, row=4, col=1)
@@ -765,10 +903,31 @@ def main():
             ["Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days"]
         )
         
-        # Parameter selection
+        # Parameter selection with availability info
+        if analysis_mode == "Single Node":
+            available_params = get_available_parameters(selected_node) if 'selected_node' in locals() else list(FIELD_MAPPING.values())
+        else:
+            # Dual node mode - show parameter availability
+            common_params = get_common_parameters()
+            node1_only = [p for p in get_available_parameters(1) if p not in common_params]
+            node2_only = [p for p in get_available_parameters(2) if p not in common_params]
+            
+            # Show parameter availability info in expander
+            with st.expander("📊 Parameter Availability Info", expanded=False):
+                if common_params:
+                    st.success(f"🔗 **Common parameters (both nodes):** {', '.join(common_params)}")
+                if node1_only:
+                    st.info(f"🔵 **Node-1 only (35m):** {', '.join(node1_only)}")
+                if node2_only:
+                    st.info(f"🔴 **Node-2 only (25m):** {', '.join(node2_only)}")
+            
+            # Combine all available parameters
+            all_params = common_params + node1_only + node2_only
+            available_params = all_params if all_params else list(FIELD_MAPPING.values())
+        
         parameter = st.selectbox(
             "📊 Parameter",
-            list(FIELD_MAPPING.values())
+            available_params
         )
         
         # Smoothing window
@@ -856,6 +1015,9 @@ def main():
                 <strong>📍 Dual Node Setup:</strong> Node-1 at 35m height | Node-2 at 25m height | 10m vertical separation for gradient analysis
             </div>
             """, unsafe_allow_html=True)
+            
+            # Show parameter configuration
+            create_parameter_info_display()
             
             # Filter data by time range for both nodes
             filtered_df1 = filter_data_by_timerange(df1, timerange)
@@ -1507,12 +1669,17 @@ def main():
             st.subheader("⚡ Advanced Gradient Analysis")
             
             if not filtered_df1.empty and not filtered_df2.empty:
-                # Parameter selector for gradient analysis
-                gradient_params = st.multiselect(
-                    "Select parameters for gradient analysis:",
-                    list(FIELD_MAPPING.values()),
-                    default=['PM2_5_ugm3', 'Temperature_C']
-                )
+                # Parameter selector for gradient analysis - only common parameters
+                common_params = get_common_parameters()
+                if common_params:
+                    gradient_params = st.multiselect(
+                        "Select parameters for gradient analysis:",
+                        common_params,
+                        default=common_params[:2] if len(common_params) >= 2 else common_params
+                    )
+                else:
+                    st.warning("No common parameters available for gradient analysis between the two nodes.")
+                    gradient_params = []
                 
                 if gradient_params:
                     # Calculate gradients for multiple parameters
