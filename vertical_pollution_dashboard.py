@@ -90,9 +90,11 @@ def fetch_thingspeak_data(results=2000):
         # Convert to DataFrame
         df = pd.DataFrame(data['feeds'])
         
-        # Parse timestamp
-        df['created_at'] = pd.to_datetime(df['created_at'])
-        df['created_at_local'] = df['created_at'] + timedelta(hours=5, minutes=30)  # IST
+        # Parse timestamp and handle timezone properly
+        df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
+        df['created_at_local'] = df['created_at'] + pd.Timedelta(hours=5, minutes=30)  # Convert to IST
+        # Remove timezone info to avoid comparison issues
+        df['created_at_local'] = df['created_at_local'].dt.tz_localize(None)
         
         # Rename fields and convert to numeric
         for field, name in FIELD_MAPPING.items():
@@ -115,11 +117,28 @@ def get_data_status(df):
         return "❌ No Data", "No data available", "danger"
     
     last_update = df['created_at_local'].iloc[-1]
-    time_diff = datetime.now() - last_update.replace(tzinfo=None)
     
-    if time_diff < timedelta(minutes=5):
+    # Handle timezone-aware comparison
+    if hasattr(last_update, 'tz') and last_update.tz is not None:
+        # If data has timezone info, use it
+        current_time = pd.Timestamp.now(tz=last_update.tz)
+        time_diff = current_time - last_update
+    else:
+        # If no timezone info, treat as naive datetime
+        current_time = pd.Timestamp.now().tz_localize(None)
+        if hasattr(last_update, 'tz_localize'):
+            last_update = last_update.tz_localize(None)
+        time_diff = current_time - last_update
+    
+    # Convert to timedelta if it's not already
+    if hasattr(time_diff, 'total_seconds'):
+        time_diff_seconds = time_diff.total_seconds()
+    else:
+        time_diff_seconds = time_diff.total_seconds()
+    
+    if time_diff_seconds < 300:  # 5 minutes
         return "🟢 Live", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "success"
-    elif time_diff < timedelta(hours=1):
+    elif time_diff_seconds < 3600:  # 1 hour
         return "🟡 Recent", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "warning"
     else:
         return "🔴 Offline", f"Last update: {last_update.strftime('%Y-%m-%d %H:%M:%S IST')}", "danger"
@@ -129,7 +148,16 @@ def filter_data_by_timerange(df, timerange):
     if df is None or df.empty:
         return df
         
-    now = datetime.now()
+    # Get timezone-aware datetime for comparison
+    if not df['created_at_local'].empty:
+        # Use the timezone from the data if available, otherwise assume UTC+5:30 (IST)
+        if df['created_at_local'].dt.tz is not None:
+            now = pd.Timestamp.now(tz=df['created_at_local'].dt.tz)
+        else:
+            # Convert to timezone-naive for comparison
+            now = pd.Timestamp.now().tz_localize(None)
+    else:
+        now = pd.Timestamp.now().tz_localize(None)
     
     if timerange == "Last 6 hours":
         cutoff = now - timedelta(hours=6)
@@ -141,6 +169,12 @@ def filter_data_by_timerange(df, timerange):
         cutoff = now - timedelta(days=30)
     else:
         return df
+    
+    # Ensure both sides of comparison have same timezone handling
+    if df['created_at_local'].dt.tz is not None and cutoff.tz is None:
+        cutoff = cutoff.tz_localize(df['created_at_local'].dt.tz.zone)
+    elif df['created_at_local'].dt.tz is None and hasattr(cutoff, 'tz') and cutoff.tz is not None:
+        cutoff = cutoff.tz_localize(None)
     
     return df[df['created_at_local'] > cutoff]
 
