@@ -860,11 +860,11 @@ def create_comprehensive_multi_parameter_plot(df1, df2, timerange="All Time"):
     return fig
 
 def main():
-    # Header
+    # Header with updated timestamp
     st.markdown("""
     <div class="header-section">
         <h1>🌍 Vertical Pollution Dispersion Live Analysis</h1>
-        <p>Real-time air quality monitoring and vertical profile estimation</p>
+        <p>Real-time air quality monitoring and vertical profile estimation - Updated Nov 2025</p>
     </div>
     """, unsafe_allow_html=True)
     
